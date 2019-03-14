@@ -1,0 +1,260 @@
+# MTCNN的样本制作
+
+### 一、正确的裁剪样本示例
+
+在学完整个MTCNN项目后，我把重点放在了如何训练网络和如何使用网络上。的确，MTCNN设计的特殊性，使得它的训练部分和使用部分的代码是完全不一样的，这在理解上有一定的难度。在我花了几天功夫琢磨透这部分代码功能后，还是能够掌握的，毕竟再难的东西也是由简单的逻辑一步步堆成的。可自己实现之后发现，网络得到的结果是惊人的差，框不全人脸不说，而且还有很多框错的，大小不一的，质量相当的差。
+
+后来老师看了我的样本，找出了两个问题，其实我之前预料到了一个，但还有一个是比较意外的，我预料到的是我的负样本里面参杂了一些人脸样本，我没预料到的是我的部分样本做的完全不正确，我做的部分样本和正样本完全一样了。
+
+![未标题-1](/Users/zhaoxuran/Desktop/未标题-1.jpg)
+
+<center>左边是错误的部分人脸和非人脸数据，右边是正确的部分人脸数据和非人脸数据</center>
+
+**所以部分人脸样本一定要展现真正的部分人脸，不要把整个人脸露出来，而负样本一定要是完全没有人脸信息的图片**
+
+另外还有一个点是样本的数量，PRO三个网络，建议**一共要制作300万张样本的量才是足够的**。
+
+### 二、重新开始制作
+
+于是，我为了制作准确的数据集，先从celeba数据集里拷贝了500张图，用这部分小一点的原数据制作样本测试。我先用一个for循环，查看了这500张数据图片的建议框和中点的样子，然后开始设计样本裁剪的思路。
+
+```python
+import cv2
+import matplotlib.pyplot as plt
+import os
+
+img_path = r"/Users/zhaoxuran/Desktop/celeba/img_celeba.7z/img_celeba/preview"
+label_path = r"/Users/zhaoxuran/Desktop/list_bbox_celeba.txt"
+
+for i, lines in enumerate(open(label_path, "r")):
+    if i < 2:
+        continue
+    filename = lines.split()[0]
+    x1 = int(lines.split()[1])
+    y1 = int(lines.split()[2])
+    w = int(lines.split()[3])
+    h = int(lines.split()[4])
+    img = cv2.imread(os.path.join(img_path, filename))
+    # 画矩形框
+    cv2.rectangle(img, (x1, y1), (x1+w, y1+h), (0, 255, 0), 4)
+    # 画中心点
+    cv2.circle(img, (x1+int(w/2),y1+int(h/2)), 10, (0, 255, 0),-20)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    plt.imshow(img)
+    plt.show()
+```
+
+![image-20190314155601405](/var/folders/h8/rlcqt5753rn18j40hs_3yyfr0000gp/T/abnerworks.Typora/image-20190314155601405.png)
+
+<center>celiba标注的数据集对应原图的建议框</center>
+
+制作样本的思路肯定要用到计算交并比IoU，就上面这张图来说，制作正样本比较简单，我们以建议框的中心为正样本的中心，边长随机在建议框的宽高稍微浮动一下，然后计算我们生成的方框和原图的建议框的IoU，然后我们判定，如果IoU > 0.65，我们就说他是正样本，如果在0.4至0.65的，我们说是部分样本，如果完全为0的，我们说是负样本，这么做一下试试吧。
+
+首先是IoU的代码
+
+```python
+import numpy as np
+
+
+def IoU(box, boxes):
+    # box = [x1, y1, x2, y2]
+    # 计算box的面积，得到一个标量
+    box_area = (box[2] - box[0]) * (box[3] - box[1])
+    # boxes = [[x1, y1, x2, y2],
+    #         [x1, y1, x2, y2],
+    #         [x1, y1, x2, y2],
+    #         [......        ]]
+    # 计算boxes的面积，得到[area1, area2,....]
+    boxes_area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+
+    # 计算IoU的方法就是，这有一个目标框box，和一堆等待计算IoU的框，
+    # 我们比较目标框的左上角坐标x，y和待计算的一堆框的左上角的一堆x，y的最大值
+    # 和最小的右下角x，y对应坐标的值，这就是相交的那个矩形
+    x1 = np.maximum(boxes[0], boxes[:, 0])
+    y1 = np.maximum(boxes[1], boxes[:, 1])
+    x2 = np.minimum(boxes[2], boxes[:, 2])
+    y2 = np.minimum(boxes[3], boxes[:, 3])
+
+    # 计算这个矩形的宽和高，当然如果没有交集的话，应该是负数，
+    # 所以如果出现负数我们就直接给0值即可
+    w = np.maximum(0, x2 - x1)
+    h = np.maximum(0, y2 - y1)
+    inter = w * h
+    ovr = inter / (box_area + boxes_area - inter)
+    return ovr
+```
+
+老师给的参考代码是一组按照3个尺寸分类的代码，通过计算IoU，得到样本，我的改进是，按正样本，负样本，部分样本分成3类
+
+我分享一组正样本的代码，部分样本和负样本，经过小的调参即可生成
+
+```python
+import os
+from PIL import Image
+import numpy as np
+import utils
+import cv2
+import matplotlib.pyplot as plt
+import traceback
+import random
+
+img_path = r"/Users/zhaoxuran/Desktop/celeba/img_celeba.7z/img_celeba/preview"
+label_path = r"/Users/zhaoxuran/Desktop/list_bbox_celeba.txt"
+
+save_path = r"./data"
+
+# 正样本裁剪框的中心点偏移程度
+CROP_CENTER_POINT_DEVIATION = 0.05
+# 正样本裁剪框边长相对于建议框的最小比值
+CROP_SIDE_LENGTH = 0.8
+
+face_size_list = [12,24,48]
+
+for face_size in face_size_list:
+    # 创建存储样本的文件夹
+    positive_image_dir = os.path.join(save_path, str(face_size), "positive")
+    negative_image_dir = os.path.join(save_path, str(face_size), "negative")
+    part_image_dir = os.path.join(save_path, str(face_size), "part")
+    for dir_path in [positive_image_dir, negative_image_dir, part_image_dir]:
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+    # 样本的标签的txt文件
+    positive_label = os.path.join(save_path, str(face_size), "positive.txt")
+    negative_label = os.path.join(save_path, str(face_size), "negative.txt")
+    part_label = os.path.join(save_path, str(face_size), "part.txt")
+
+    positive_count = 0
+    # negative_count = 0
+    # part_count = 0
+
+    try:
+        positive_open_label = open(positive_label, "w")
+        # negative_open_label = open(negative_label, "w")
+        # part_open_label = open(part_label, "w")
+
+        for i, line in enumerate(open(label_path)):
+            if i < 2:
+                continue
+            try:
+                filename = line.split()[0]
+                x1 = float(line.split()[1])
+                y1 = float(line.split()[2])
+                w = float(line.split()[3])
+                h = float(line.split()[4])
+                x2 = x1 + w
+                y2 = y1 + h
+
+                # 如果w和h最大边都小于40像素的，或者这几个提供的值有负数的都跳过
+                if max(w, h) < 40 or x1 < 0 or y1 < 0 or w < 0 or h < 0:
+                    continue
+                box = np.array([x1, y1, x2, y2])
+                cx = x1 + w / 2
+                cy = y1 + h / 2
+
+                for _ in range(1):
+                    # 让中心点有少许偏移
+                    w_ = np.random.randint(-w * CROP_CENTER_POINT_DEVIATION, w * CROP_CENTER_POINT_DEVIATION)
+                    h_ = np.random.randint(-h * CROP_CENTER_POINT_DEVIATION, h * CROP_CENTER_POINT_DEVIATION)
+
+                    cx_ = int(cx + w_)
+                    cy_ = int(cy + h_)
+
+
+
+                    side_len = np.random.randint(int(min(w, h) * CROP_SIDE_LENGTH), np.ceil(max(w, h)))
+                    x1_ = int(np.max(cx_ - side_len / 2, 0))
+                    y1_ = int(np.max(cy_ - side_len / 2, 0))
+                    x2_ = int(x1_ + side_len)
+                    y2_ = int(y1_ + side_len)
+
+                    crop_box = np.array([[x1_, y1_, x2_, y2_]])
+
+                    # 计算偏移值
+                    offset_x1 = (x1 - x1_) / side_len
+                    offset_y1 = (y1 - y1_) / side_len
+                    offset_x2 = (x2 - x2_) / side_len
+                    offset_y2 = (y2 - y2_) / side_len
+
+                    img = Image.open(os.path.join(img_path,filename))
+                    face_crop = img.crop([x1_, y1_, x2_, y2_])
+                    face_resize = face_crop.resize((face_size, face_size))
+
+                    iou = utils.IoU(box,crop_box)[0]
+
+                    if iou>0.3:
+                        positive_open_label.write(
+                            "part/{0}.jpg {1} {2} {3} {4} {5}\n".format(
+                                positive_count,1,offset_x1,offset_y1,offset_x2,offset_y2
+                            )
+                        )
+                        positive_open_label.flush()
+                        face_resize.save(os.path.join(positive_image_dir,"{}.jpg".format(positive_count)))
+                        positive_count+=1
+
+
+                    # img = cv2.imread(os.path.join(img_path, filename))
+                    # font = cv2.FONT_HERSHEY_SIMPLEX
+                    # cv2.rectangle(img, (int(x1), int(y1)), (int(x1) + int(w), int(y1) + int(h)), (255, 0, 0), 4)
+                    # imgzi = cv2.putText(img, "{}".format(iou), (x1_, y1_-20), font, 1.2, (0, 255, 0), 2)
+                    # cv2.rectangle(img, (x1_, y1_), (x2_, y2_), (0, 255, 0), 4)
+                    # cv2.circle(img, (cx_, cy_), 10, (0, 255, 0), -20)
+                    # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    # plt.imshow(img)
+                    # plt.show()
+            except Exception as e:
+                traceback.print_exc()
+            if i%100==0:
+                print("正样本数为{}".format(positive_count))
+
+    finally:
+        positive_open_label.close()
+```
+
+负样本生成的规则是，让裁剪的建议框的中心点不准进入图片给出的建议框中，也不准落到图像外面
+
+```python
+cx_ = int(cx + w_)
+cy_ = int(cy + h_)
+img = Image.open(os.path.join(img_path, filename))
+w_side,h_side = img.size
+if cx_>=x1-48 and cx_<=x2+48 and cy_>=y1-48 and cy_<=y2+48:
+    continue
+if cx_<24 or cx_>w_side or cy_<24 or cy_>h_side:
+    continue
+
+side_len = 48
+```
+
+部分人脸生成的规则和正样本差不多，只是给大一点的范围让中心点跳跃
+
+```python
+# 部分样本裁剪框的中心点偏移程度
+CROP_CENTER_POINT_DEVIATION = 0.55
+# 部分样本裁剪框边长相对于建议框的最小比值
+CROP_SIDE_LENGTH = 0.7
+```
+
+<center>**celiba测试500张，通过不同给的for循环次数产生的样本量**</center>
+
+| 样本名       | for循环次数 | 3种尺寸样本量的平均数 |
+| ------------ | ----------- | --------------------- |
+| 正样本       | 1           | 500                   |
+| 负样本       | 10          | 1058                  |
+| 部分人脸样本 | 1           | 500                   |
+
+celeba共有20万张左右，根据上表的实验：
+
+- 正样本的for循环次数填5，应该每种尺寸会产生100万张，共300万张；
+- 负样本的for循环次数填75，应该每种尺寸会产生300万张，共900万张；
+- 正样本的for循环次数填5，应该每种尺寸会产生100万张，共300万张
+
+总计1500万张
+
+最终生成的部分样本截图
+
+![image-20190314201550852](/var/folders/h8/rlcqt5753rn18j40hs_3yyfr0000gp/T/abnerworks.Typora/image-20190314201550852.png)
+
+![image-20190314201629149](/var/folders/h8/rlcqt5753rn18j40hs_3yyfr0000gp/T/abnerworks.Typora/image-20190314201629149.png)
+
+![image-20190314201642315](/var/folders/h8/rlcqt5753rn18j40hs_3yyfr0000gp/T/abnerworks.Typora/image-20190314201642315.png)
+
